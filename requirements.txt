@@ -4,3 +4,4 @@ flask-limiter
 flask-cors
 gunicorn
 safety
+redis

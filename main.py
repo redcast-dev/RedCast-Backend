@@ -3,6 +3,11 @@ from flask_cors import CORS
 from downloader import get_video_info, stream_media, download_subtitles
 from security import setup_security
 import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -11,7 +16,23 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
 CORS(app, origins=[FRONTEND_URL])
 
 # Setup rate limiting and security headers
-setup_security(app)
+try:
+    setup_security(app)
+    logger.info("Security and Rate Limiting initialized.")
+except Exception as e:
+    logger.error(f"Failed to initialize security: {e}")
+
+@app.route("/")
+def index():
+    return jsonify({
+        "message": "RedCast API is running",
+        "endpoints": {
+            "info": "/api/info (POST)",
+            "download": "/api/download (GET)",
+            "subtitles": "/api/subtitles (GET)",
+            "health": "/api/health (GET)"
+        }
+    }), 200
 
 @app.route("/api/info", methods=["POST"])
 def video_info():
