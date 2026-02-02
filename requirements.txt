@@ -1,0 +1,6 @@
+flask
+yt-dlp
+flask-limiter
+flask-cors
+gunicorn
+safety

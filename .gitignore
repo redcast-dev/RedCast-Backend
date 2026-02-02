@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+downloads/
+bin/
+ffmpeg.zip
+ffmpeg_temp/
+*.log
+.DS_Store
+.vscode/
+.env
