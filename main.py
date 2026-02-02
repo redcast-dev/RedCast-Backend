@@ -4,6 +4,7 @@ from downloader import get_video_info, stream_media, download_subtitles
 from security import setup_security
 import os
 import logging
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -74,7 +75,12 @@ def download():
             }
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        error_msg = traceback.format_exc()
+        logger.error(f"Download Error: {str(e)}\n{error_msg}")
+        return jsonify({
+            "error": str(e),
+            "traceback": error_msg if os.getenv("DEBUG", "true").lower() == "true" else None
+        }), 500
 
 @app.route("/api/subtitles", methods=["GET"])
 def subtitles():
@@ -95,7 +101,12 @@ def subtitles():
             }
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        error_msg = traceback.format_exc()
+        logger.error(f"Subtitle Error: {str(e)}\n{error_msg}")
+        return jsonify({
+            "error": str(e),
+            "traceback": error_msg if os.getenv("DEBUG", "true").lower() == "true" else None
+        }), 500
 
 @app.route("/api/health")
 def health():
