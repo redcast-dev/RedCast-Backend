@@ -26,9 +26,9 @@ def get_ydl_base_opts():
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        # User-Agent spoofing - use iPhone to match the ios player client
+        # User-Agent spoofing - use iPhone-style UA (can help with some geo / age gates)
         'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
-        # Additional headers to appear more like a mobile device
+        # Additional headers to appear more like a regular browser
         'http_headers': {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-us,en;q=0.5',
@@ -39,16 +39,9 @@ def get_ydl_base_opts():
         'fragment_retries': 10,
         'skip_unavailable_fragments': True,
         'socket_timeout': 30,
-        # Extractor args for YouTube specifically
-        # - Avoid 'web' client to prevent "Sign in" errors
-        # - Use 'android' and 'ios' for best compatibility
-        # - Do NOT skip HLS/DASH as they are needed for these clients
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios'],
-                'player_skip': ['webpage', 'configs'],
-            }
-        },
+        # IMPORTANT: do NOT override youtube player_client here.
+        # Let yt-dlp use its default client selection so that all
+        # available formats (including 720p/1080p/4K) are exposed.
     }
 
     # --- Cookie handling for bot / sign-in checks ---
