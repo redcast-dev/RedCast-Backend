@@ -6,6 +6,8 @@ import re
 import time
 import logging
 from pathlib import Path
+import tempfile
+import glob
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -110,31 +112,6 @@ def _get_best_video_format_id(info, target_height):
     return None
 
 
-def _get_crf_for_height(height: int) -> str:
-    """
-    Choose a CRF value based on resolution so that higher
-    resolutions keep more detail and lower resolutions stay efficient.
-    Lower CRF = higher quality.
-    """
-    try:
-        h = int(height)
-    except Exception:
-        h = 1080
-
-    if h >= 4320:
-        return "19"
-    if h >= 2160:
-        return "20"
-    if h >= 1440:
-        return "21"
-    if h >= 1080:
-        return "22"
-    if h >= 720:
-        return "23"
-    if h >= 480:
-        return "24"
-    return "25"
-
 def get_video_info(url):
     ydl_opts = get_ydl_base_opts()
     ydl_opts.update({
@@ -175,223 +152,152 @@ def get_video_info(url):
             'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions'))
         }
 
-def _stream_subprocess(process):
-    """Yields bytes from a subprocess stdout"""
-    try:
-        while True:
-            chunk = process.stdout.read(128 * 1024) # Increased chunk size
-            if not chunk:
-                break
-            yield chunk
-        
-        if process.poll() is not None and process.returncode != 0:
-            stderr = process.stderr.read().decode('utf-8', errors='replace')
-            logger.error(f"FFmpeg process failed with code {process.returncode}: {stderr}")
-    except Exception as e:
-        logger.error(f"Streaming yield error: {e}")
-    finally:
-        try:
-            process.stdout.close()
-            process.stderr.close()
-            process.terminate()
-            process.wait(timeout=1)
-        except Exception as e:
-            logger.debug(f"Process cleanup error: {e}")
+def _build_yt_dlp_options_for_mode(url, quality, mode):
+    """
+    Build a yt-dlp configuration for the selected mode and quality.
+    This lets yt-dlp (and its internal ffmpeg calls) handle all merging
+    and container details, which is far more reliable than manually
+    piping via ffmpeg.
+    """
+    base_opts = get_ydl_base_opts()
+    q = int(quality) if str(quality).isdigit() else 1080
+    mode = (mode or "video").lower()
+
+    # Temporary directory & filename pattern; actual temp dir is injected later.
+    opts = {
+        **base_opts,
+        'noplaylist': True,
+    }
+
+    is_audio = mode.startswith("audio")
+    is_webm = "webm" in mode
+
+    if is_audio:
+        # Audio-only: use best audio and convert to MP3 with requested bitrate.
+        bitrate = "192"
+        if "320" in mode:
+            bitrate = "320"
+        elif "128" in mode:
+            bitrate = "128"
+        elif "64" in mode:
+            bitrate = "64"
+
+        opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': bitrate,
+            }],
+            'preferredquality': bitrate,
+        })
+        ext = "mp3"
+        content_type = "audio/mpeg"
+    else:
+        # Video modes
+        if is_webm:
+            # Prefer VP9/Opus WebM, capped by height
+            fmt = (
+                f"bestvideo[height<={q}][ext=webm]+bestaudio[ext=webm]/"
+                f"best[height<={q}][ext=webm]/best[ext=webm]/best"
+            )
+            opts.update({
+                'format': fmt,
+                'merge_output_format': 'webm',
+            })
+            ext = "webm"
+            content_type = "video/webm"
+        else:
+            # Default: MP4 video – constrain by height and prefer mp4 container.
+            fmt = (
+                f"bestvideo[height<={q}][ext=mp4]+bestaudio[ext=m4a]/"
+                f"best[height<={q}][ext=mp4]/best[ext=mp4]/"
+                f"bestvideo[height<={q}]+bestaudio/best"
+            )
+            opts.update({
+                'format': fmt,
+                'merge_output_format': 'mp4',
+            })
+            ext = "mp4"
+            content_type = "video/mp4"
+
+    return opts, ext, content_type
+
 
 def stream_media(url, quality, mode):
     """
-    Generates a stream of data using ffmpeg pipe.
+    Download media with yt-dlp into a temporary file, then stream that file
+    back to the client in chunks. This avoids fragile ffmpeg piping and
+    dramatically reduces the risk of 0-byte or corrupted outputs.
     """
-    # 1. Fetch info
-    ydl_opts_info = get_ydl_base_opts()
-    ydl_opts_info.update({'skip_download': True})
-    
-    target_height = quality if quality else '1080'
-    
-    with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+    quality = quality or "1080"
+
+    # Configure yt-dlp based on mode/quality
+    ydl_opts, ext, content_type = _build_yt_dlp_options_for_mode(url, quality, mode)
+
+    # Create a temp directory to hold the downloaded file(s)
+    tmpdir = tempfile.mkdtemp(prefix="redcast_")
+    outtmpl = os.path.join(tmpdir, "download.%(ext)s")
+    ydl_opts['outtmpl'] = outtmpl
+
+    logger.info(f"Starting yt-dlp download for URL={url}, quality={quality}, mode={mode}")
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except Exception as e:
+        # Cleanup temp directory on failure
         try:
-            info_full = ydl.extract_info(url, download=False)
-        except Exception as e:
-            raise Exception(f"Failed to extract video info: {str(e)}")
+            for f in glob.glob(os.path.join(tmpdir, "*")):
+                os.remove(f)
+            os.rmdir(tmpdir)
+        except Exception:
+            pass
+        logger.error(f"yt-dlp download failed: {e}")
+        raise Exception(f"Download failed: {str(e)}")
 
-    video_url = None
-    audio_url = None
-    selected_video_fmt = None
-    
-    mode = mode.lower()
-    is_video = "video" in mode or "vid" == mode or "webm" in mode
+    # Locate the actual output file
+    files = glob.glob(os.path.join(tmpdir, "download.*"))
+    if not files:
+        # Fallback: try to infer from info
+        logger.error("No output files found after yt-dlp download.")
+        try:
+            for f in glob.glob(os.path.join(tmpdir, "*")):
+                os.remove(f)
+            os.rmdir(tmpdir)
+        except Exception:
+            pass
+        raise Exception("Internal error: no downloaded file found.")
 
-    if is_video:
-        ext = "webm" if "webm" in mode else "mp4"
-        content_type = "video/webm" if ext == "webm" else "video/mp4"
-        target_height_int = int(target_height) if str(target_height).isdigit() else 1080
-        video_id = _get_best_video_format_id(info_full, target_height_int)
-        formats = info_full.get('formats', [])
-        
-        if video_id:
-            selected_video_fmt = next((f for f in formats if f['format_id'] == video_id), None)
-            
-        if not selected_video_fmt:
-            # Last resort fallback
-            candidates = [f for f in formats if f.get('vcodec') != 'none' and f.get('height')]
-            if candidates:
-                selected_video_fmt = max(candidates, key=lambda f: (f.get('height') or 0)) 
-            
-        if selected_video_fmt:
-            video_url = selected_video_fmt['url']
-        
-        # Audio selection
-        # Only look for separate audio if the video doesn't have it
-        if selected_video_fmt and selected_video_fmt.get('acodec') != 'none':
-            # Video stream already has audio (common with HLS/iOS)
-            audio_url = None
-        else:
-            audio_candidates = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-            if audio_candidates:
-                if ext == "webm":
-                    # For WebM, opus/vorbis is better
-                    opus_candidates = [f for f in audio_candidates if 'opus' in f.get('acodec', '')]
-                    best_audio = max(opus_candidates if opus_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
-                else:
-                    # For MP4, AAC is best
-                    aac_candidates = [f for f in audio_candidates if 'mp4a' in f.get('acodec', '')]
-                    best_audio = max(aac_candidates if aac_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
-                audio_url = best_audio['url']
-    else:
-        ext = "mp3"
-        content_type = "audio/mpeg"
-        audio_candidates = [f for f in info_full.get('formats', []) if f.get('acodec') != 'none']
-        if audio_candidates:
-            best_audio = max(audio_candidates, key=lambda f: (f.get('tbr') or 0))
-            audio_url = best_audio['url']
-            
-    title = info_full.get('title', 'video')
-    safe_title = re.sub(r'[^\w\-_\. ]', '_', title)[:200]
-    filename = f"{safe_title}.{ext}"
+    filepath = files[0]
+    filename = os.path.basename(filepath)
 
-    ffmpeg_binary = "ffmpeg"
-    input_args = []
-    map_args = []
-    codec_args = []
-    
-    # Enhanced network args for stability (kept conservative for broad ffmpeg compatibility)
-    # NOTE: Avoid very new/less common flags like `-multiple_requests` that can cause ffmpeg
-    # to fail immediately on older builds, resulting in 0-byte downloads.
-    network_args = [
-        '-reconnect', '1',
-        '-reconnect_at_eof', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '10',
-        '-thread_queue_size', '16384',
-    ]
-    
-    if is_video:
-        if video_url and audio_url:
-            input_args.extend(['-probesize', '32M', '-analyzeduration', '10M'])
-            input_args.extend(network_args + ['-i', video_url])
-            input_args.extend(network_args + ['-i', audio_url])
-            map_args.extend(['-map', '0:v:0', '-map', '1:a:0'])
+    def file_generator(path, directory):
+        """Yield file contents in chunks, then clean up temp files."""
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)  # 1 MB
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            try:
+                # Remove any stray files and the temp directory itself
+                for f in glob.glob(os.path.join(directory, "*")):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+                os.rmdir(directory)
+            except Exception:
+                pass
 
-            # Check video codec to determine if re-encoding is needed
-            vcodec = (selected_video_fmt.get('vcodec') or '').lower()
-            height = selected_video_fmt.get('height') or target_height_int
-            crf_value = _get_crf_for_height(height)
-
-            if ext == "webm":
-                # For WebM output, keep VP9 when possible, otherwise re-encode to VP9
-                if 'vp9' in vcodec or 'vp09' in vcodec:
-                    codec_args.extend(['-c:v', 'copy', '-c:a', 'libopus', '-b:a', '192k'])
-                else:
-                    codec_args.extend([
-                        '-c:v', 'libvpx-vp9',
-                        '-crf', crf_value,
-                        '-b:v', '0',
-                        '-c:a', 'libopus',
-                        '-b:a', '192k'
-                    ])
-            else:
-                # For MP4 output, ALWAYS re-encode to H.264 yuv420p for maximum compatibility
-                codec_args.extend([
-                    '-c:v', 'libx264',
-                    '-preset', 'fast',  # Fast encoding for streaming
-                    '-crf', crf_value,
-                    '-pix_fmt', 'yuv420p',  # Critical: fixes green screen & compatibility
-                    '-profile:v', 'high',
-                    '-c:a', 'aac',
-                    '-b:a', '192k'
-                ])
-        elif video_url:
-            input_args.extend(network_args + ['-i', video_url])
-            vcodec = (selected_video_fmt.get('vcodec') or '').lower()
-            height = selected_video_fmt.get('height') or target_height_int
-            crf_value = _get_crf_for_height(height)
-
-            if ext == "mp4":
-                # Single input (video already has audio). Re-encode to a widely supported MP4.
-                codec_args = [
-                    '-c:v', 'libx264',
-                    '-preset', 'fast',
-                    '-crf', crf_value,
-                    '-pix_fmt', 'yuv420p',
-                    '-profile:v', 'high',
-                    '-c:a', 'aac',
-                    '-b:a', '192k'
-                ]
-            else:
-                # WebM path – copy VP9 when possible, otherwise re-encode to VP9
-                if 'vp9' in vcodec or 'vp09' in vcodec:
-                    codec_args = ['-c:v', 'copy', '-c:a', 'copy']
-                else:
-                    codec_args = [
-                        '-c:v', 'libvpx-vp9',
-                        '-crf', crf_value,
-                        '-b:v', '0',
-                        '-c:a', 'libopus',
-                        '-b:a', '192k'
-                    ]
-        else:
-            raise Exception("Could not find suitable video stream")
-
-        if ext == "mp4":
-            # Produce a standard, player-friendly MP4 instead of a highly fragmented streaming-only file
-            output_args = [
-                '-f', 'mp4',
-                '-movflags', '+faststart',
-                'pipe:1'
-            ]
-        else:
-            # Regular WebM container (no DASH segments) for better compatibility with players
-            output_args = ['-f', 'webm', 'pipe:1']
-    else:
-        target_url = audio_url if audio_url else video_url
-        if not target_url:
-            raise Exception("No suitable stream found")
-        input_args.extend(network_args + ['-i', target_url])
-        bitrate = '192k'
-        if '320' in mode: bitrate = '320k'
-        elif '128' in mode: bitrate = '128k'
-        elif '64' in mode: bitrate = '64k'
-        codec_args = ['-vn', '-c:a', 'libmp3lame', '-b:a', bitrate]
-        output_args = ['-f', 'mp3', 'pipe:1']
-        
-    full_cmd = [ffmpeg_binary, '-hide_banner', '-loglevel', 'error'] + input_args + map_args + codec_args + output_args
-    logger.info(f"Starting ffmpeg with command: {' '.join(full_cmd)}")
-    
-    # Start process
-    process = subprocess.Popen(
-        full_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, 
-        bufsize=2*1024*1024 # 2MB buffer
-    )
-    
-    time.sleep(0.5)
-    if process.poll() is not None:
-        stderr = process.stderr.read().decode('utf-8', errors='replace')
-        logger.error(f"FFmpeg failed to start. Command: {' '.join(full_cmd)}\nError: {stderr}")
-        raise Exception(f"FFmpeg failed to start: {stderr}")
-
-    return (_stream_subprocess(process), filename, content_type)
+    return (file_generator(filepath, tmpdir), filename, content_type)
 
 def download_subtitles(url, lang='en'):
     import glob
