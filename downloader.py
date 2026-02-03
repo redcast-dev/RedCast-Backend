@@ -5,6 +5,7 @@ import json
 import re
 import time
 import logging
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -12,6 +13,52 @@ logger = logging.getLogger(__name__)
 
 # Use environment variables or defaults
 MAX_DURATION = int(os.getenv("MAX_DURATION_SECONDS", 1800)) # 30 minutes
+
+# Enhanced yt-dlp options to bypass bot detection
+def get_ydl_base_opts():
+    """
+    Returns base yt-dlp options with anti-bot measures.
+    This includes cookie extraction from browser and user-agent spoofing.
+    """
+    opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        # User-Agent spoofing - rotate between common browsers
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        # Additional headers to appear more like a real browser
+        'http_headers': {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Sec-Fetch-Mode': 'navigate',
+        },
+        # Retry and timeout settings
+        'retries': 10,
+        'fragment_retries': 10,
+        'skip_unavailable_fragments': True,
+        'socket_timeout': 30,
+        # Extractor args for YouTube specifically
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],
+                'player_skip': ['webpage', 'configs'],
+                'skip': ['hls', 'dash'],
+            }
+        },
+    }
+    
+    # Note: Cookie extraction is disabled by default because it often fails when browsers are running
+    # If you need cookie authentication, you can:
+    # 1. Close all browser instances before running
+    # 2. Manually export cookies to a file and use 'cookiefile' option
+    # 3. Sign in to YouTube in a browser and the session may persist
+    
+    # Uncomment below to enable cookie extraction (may cause errors if browser is running):
+    # opts['cookiesfrombrowser'] = ('chrome',)  # or 'firefox', 'edge', etc.
+    
+    logger.info("Using enhanced anti-bot configuration (without cookie extraction)")
+    
+    return opts
 
 def _get_best_video_format_id(info, target_height):
     """
@@ -65,13 +112,13 @@ def _get_best_video_format_id(info, target_height):
     return None
 
 def get_video_info(url):
-    ydl_opts = {
-        'skip_download': True, 
-        'quiet': True,
-        'noplaylist': False, # Enable playlist analysis
-        'no_warnings': True,
-        'extract_flat': True, # Don't extract full details for every video in playlist yet (too slow)
-    }
+    ydl_opts = get_ydl_base_opts()
+    ydl_opts.update({
+        'skip_download': True,
+        'noplaylist': False,  # Enable playlist analysis
+        'extract_flat': True,  # Don't extract full details for every video in playlist yet (too slow)
+    })
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
@@ -132,7 +179,9 @@ def stream_media(url, quality, mode):
     Generates a stream of data using ffmpeg pipe.
     """
     # 1. Fetch info
-    ydl_opts_info = {'skip_download': True, 'quiet': True, 'no_warnings': True, 'noplaylist': True}
+    ydl_opts_info = get_ydl_base_opts()
+    ydl_opts_info.update({'skip_download': True})
+    
     target_height = quality if quality else '1080'
     
     with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
@@ -270,16 +319,15 @@ def download_subtitles(url, lang='en'):
     import tempfile
     
     with tempfile.TemporaryDirectory() as tmpdir:
-        ydl_opts = {
+        ydl_opts = get_ydl_base_opts()
+        ydl_opts.update({
             'skip_download': True,
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': [lang],
             'subtitlesformat': 'srt',
             'outtmpl': f'{tmpdir}/%(title)s.%(ext)s',
-            'quiet': True,
-            'noplaylist': True
-        }
+        })
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
