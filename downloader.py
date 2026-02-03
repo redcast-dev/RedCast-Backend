@@ -50,17 +50,24 @@ def get_ydl_base_opts():
             }
         },
     }
-    
-    # Note: Cookie extraction is disabled by default because it often fails when browsers are running
-    # If you need cookie authentication, you can:
-    # 1. Close all browser instances before running
-    # 2. Manually export cookies to a file and use 'cookiefile' option
-    # 3. Sign in to YouTube in a browser and the session may persist
-    
-    # Uncomment below to enable cookie extraction (may cause errors if browser is running):
-    # opts['cookiesfrombrowser'] = ('chrome',)  # or 'firefox', 'edge', etc.
-    
-    logger.info("Using enhanced anti-bot configuration (without cookie extraction)")
+
+    # --- Cookie handling for bot / sign-in checks ---
+    # If you provide a cookie file path via YT_COOKIES_FILE, yt-dlp will use it.
+    cookie_file = os.getenv("YT_COOKIES_FILE")
+    if cookie_file:
+        # This is equivalent to using --cookies on the yt-dlp CLI
+        opts["cookiefile"] = cookie_file
+        logger.info(f"Using YouTube cookies from file: {cookie_file}")
+    else:
+        # Optional: allow using cookies from a local browser when running
+        # the backend on a desktop (not recommended/usable on Railway).
+        browser = os.getenv("YT_COOKIES_FROM_BROWSER")
+        if browser:
+            # e.g. YT_COOKIES_FROM_BROWSER=chrome or firefox
+            opts["cookiesfrombrowser"] = (browser,)
+            logger.info(f"Using YouTube cookies from browser: {browser}")
+
+    logger.info("Using enhanced anti-bot configuration")
     
     return opts
 
