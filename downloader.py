@@ -195,11 +195,28 @@ def _build_yt_dlp_options_for_mode(url, quality, mode):
         content_type = "audio/mpeg"
     else:
         # Video modes
+        #
+        # Strategy for respecting requested resolution `q`:
+        # 1. Try an EXACT height match first (bestvideo[height=q]).
+        # 2. If not available, try any format with height >= q (prefer equal / higher).
+        # 3. Finally, fall back to the best format with height <= q.
+        #
+        # This keeps quality at or above what the user selected when possible,
+        # and only falls back below that if YouTube simply does not provide
+        # a higher-resolution stream.
         if is_webm:
-            # Prefer VP9/Opus WebM, capped by height
             fmt = (
+                # Exact height WebM
+                f"bestvideo[height={q}][ext=webm]+bestaudio[ext=webm]/"
+                f"bestvideo[height={q}]+bestaudio/"
+                # Any WebM at or above requested height
+                f"bestvideo[height>={q}][ext=webm]+bestaudio[ext=webm]/"
+                f"bestvideo[height>={q}]+bestaudio/"
+                # Any WebM up to requested height
                 f"bestvideo[height<={q}][ext=webm]+bestaudio[ext=webm]/"
-                f"best[height<={q}][ext=webm]/best[ext=webm]/best"
+                f"bestvideo[height<={q}]+bestaudio/"
+                # Generic WebM / best
+                f"best[ext=webm]/best"
             )
             opts.update({
                 'format': fmt,
@@ -208,11 +225,19 @@ def _build_yt_dlp_options_for_mode(url, quality, mode):
             ext = "webm"
             content_type = "video/webm"
         else:
-            # Default: MP4 video – constrain by height and prefer mp4 container.
+            # Default: MP4 video – allow any source ext, but merge to MP4.
             fmt = (
+                # 1) Exact requested height, prefer MP4 video + M4A audio
+                f"bestvideo[height={q}][ext=mp4]+bestaudio[ext=m4a]/"
+                f"bestvideo[height={q}]+bestaudio/"
+                # 2) Any format with height >= requested
+                f"bestvideo[height>={q}][ext=mp4]+bestaudio[ext=m4a]/"
+                f"bestvideo[height>={q}]+bestaudio/"
+                # 3) Best up to requested height
                 f"bestvideo[height<={q}][ext=mp4]+bestaudio[ext=m4a]/"
-                f"best[height<={q}][ext=mp4]/best[ext=mp4]/"
-                f"bestvideo[height<={q}]+bestaudio/best"
+                f"bestvideo[height<={q}]+bestaudio/"
+                # 4) Fallback to container-preferring bests
+                f"best[ext=mp4]/best"
             )
             opts.update({
                 'format': fmt,
