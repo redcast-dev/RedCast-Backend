@@ -343,7 +343,18 @@ def stream_media(url, quality, mode):
         raise Exception("Internal error: no downloaded file found.")
 
     filepath = files[0]
-    filename = os.path.basename(filepath)
+
+    # Build a header-safe download filename based on the original title.
+    # Many servers (and Gunicorn itself) reject non-ASCII or control
+    # characters in header values, so we aggressively sanitize here while
+    # still keeping something readable for the user.
+    raw_title = info.get('title') or Path(filepath).stem
+    safe_title = re.sub(r'[^A-Za-z0-9_\-\. ]+', '_', raw_title).strip()
+    if not safe_title:
+        safe_title = "video"
+    # Keep filename reasonably short for headers
+    safe_title = safe_title[:180]
+    filename = f"{safe_title}.{ext}"
 
     def file_generator(path, directory):
         """Yield file contents in chunks, then clean up temp files."""
