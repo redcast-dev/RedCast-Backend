@@ -274,15 +274,15 @@ def stream_media(url, quality, mode):
     map_args = []
     codec_args = []
     
-    # Enhanced network args for stability
+    # Enhanced network args for stability (kept conservative for broad ffmpeg compatibility)
+    # NOTE: Avoid very new/less common flags like `-multiple_requests` that can cause ffmpeg
+    # to fail immediately on older builds, resulting in 0-byte downloads.
     network_args = [
         '-reconnect', '1',
-        '-reconnect_at_eof', '1', # Critical for handling quick disconnections
+        '-reconnect_at_eof', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '10',
-        '-multiple_requests', '1',
-        '-thread_queue_size', '16384', # Even larger queue
-        '-err_detect', 'ignore_err' # Help skip minor packet corruption
+        '-thread_queue_size', '16384',
     ]
     
     if is_video:
@@ -375,6 +375,7 @@ def stream_media(url, quality, mode):
         output_args = ['-f', 'mp3', 'pipe:1']
         
     full_cmd = [ffmpeg_binary, '-hide_banner', '-loglevel', 'error'] + input_args + map_args + codec_args + output_args
+    logger.info(f"Starting ffmpeg with command: {' '.join(full_cmd)}")
     
     # Start process
     process = subprocess.Popen(
@@ -387,6 +388,7 @@ def stream_media(url, quality, mode):
     time.sleep(0.5)
     if process.poll() is not None:
         stderr = process.stderr.read().decode('utf-8', errors='replace')
+        logger.error(f"FFmpeg failed to start. Command: {' '.join(full_cmd)}\nError: {stderr}")
         raise Exception(f"FFmpeg failed to start: {stderr}")
 
     return (_stream_subprocess(process), filename, content_type)
