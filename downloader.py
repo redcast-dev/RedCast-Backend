@@ -24,9 +24,9 @@ def get_ydl_base_opts():
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        # User-Agent spoofing - rotate between common browsers
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        # Additional headers to appear more like a real browser
+        # User-Agent spoofing - use iPhone to match the ios player client
+        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+        # Additional headers to appear more like a mobile device
         'http_headers': {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-us,en;q=0.5',
@@ -37,10 +37,10 @@ def get_ydl_base_opts():
         'fragment_retries': 10,
         'skip_unavailable_fragments': True,
         'socket_timeout': 30,
-        # Extractor args for YouTube specifically
+        # Extractor args for YouTube specifically - 'ios' is often more resilient in data centers
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],
+                'player_client': ['ios'],
                 'player_skip': ['webpage', 'configs'],
                 'skip': ['hls', 'dash'],
             }
