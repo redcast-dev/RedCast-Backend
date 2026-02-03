@@ -64,52 +64,102 @@ def get_ydl_base_opts():
     
     return opts
 
-def _get_best_video_format_id(info, target_height):
+def _choose_video_and_audio_formats(info, target_height: int, prefer_webm: bool = False):
     """
-    Manually analyze formats to find the BEST version of the EXACT resolution requested.
+    Pick concrete video+audio formats for the requested height.
+
+    Strategy:
+      1. Try exact height match (height == target_height).
+      2. Then closest higher resolution (min height > target_height).
+      3. Finally closest lower resolution (max height < target_height).
+
+    We optionally prefer WebM streams when requested, but fall back to any
+    container if necessary so we never drop unnecessarily to a low resolution.
     """
     formats = info.get('formats', [])
-    video_formats = [
-        f for f in formats 
-        if f.get('vcodec') != 'none' and f.get('height') is not None
-    ]
-    
+    video_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('height')]
+    audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+
     if not video_formats:
-        logger.warning("No video formats found")
-        return None
-        
+        logger.warning("No video formats found for this video.")
+        return None, None
+
     target_height = int(target_height)
-    # Check for exact matches first
-    exact_matches = [f for f in video_formats if f['height'] == target_height]
-    
-    if exact_matches:
-        def score_format(f):
-            score = 0
-            vcodec = (f.get('vcodec') or '').lower()
-            
-            # Prefer VP9/AV1 for high quality (we'll re-encode to H.264 if needed)
-            if 'av01' in vcodec:
-                score += 15000
-            elif 'vp9' in vcodec or 'vp09' in vcodec:
-                score += 10000
-            elif 'avc' in vcodec or 'h264' in vcodec:
-                score += 8000
-            
-            # Bitrate is critical for quality
-            score += (f.get('tbr') or 0)
-            return score
-            
-        best = max(exact_matches, key=score_format)
-        logger.info(f"Selected exact match: {target_height}p, codec: {best.get('vcodec')}, bitrate: {best.get('tbr')}kbps")
-        return best['format_id']
-        
-    # Fallback: prefer highest quality available (not closest)
-    logger.warning(f"No exact match for {target_height}p, selecting best available quality")
-    best_available = max(video_formats, key=lambda f: (f.get('height') or 0, f.get('tbr') or 0))
-    logger.info(f"Selected fallback: {best_available.get('height')}p, codec: {best_available.get('vcodec')}, bitrate: {best_available.get('tbr')}kbps")
-    return best_available['format_id']
-        
-    return None
+
+    def score_video(f):
+        # Higher bitrate & newer codecs get higher score at the same height
+        score = 0
+        vcodec = (f.get('vcodec') or '').lower()
+        if 'av01' in vcodec or 'av1' in vcodec:
+            score += 300
+        elif 'vp9' in vcodec or 'vp09' in vcodec:
+            score += 200
+        elif 'avc' in vcodec or 'h264' in vcodec:
+            score += 150
+        score += (f.get('tbr') or 0) / 10.0
+        return score
+
+    # Apply container preference if needed
+    def filter_by_container(vfs):
+        if prefer_webm:
+            webm = [f for f in vfs if (f.get('ext') or '').lower() == 'webm']
+            if webm:
+                return webm
+        return vfs
+
+    video_formats = filter_by_container(video_formats)
+
+    exact = [f for f in video_formats if f.get('height') == target_height]
+    above = [f for f in video_formats if f.get('height') and f['height'] > target_height]
+    below = [f for f in video_formats if f.get('height') and f['height'] < target_height]
+
+    chosen_v = None
+    if exact:
+        # Best score among exact height candidates
+        chosen_v = max(exact, key=score_video)
+    elif above:
+        # Closest above: minimal height diff, then score
+        min_height = min(f['height'] for f in above)
+        closest_above = [f for f in above if f['height'] == min_height]
+        chosen_v = max(closest_above, key=score_video)
+    elif below:
+        # Closest below: maximal height, then score
+        max_height = max(f['height'] for f in below)
+        closest_below = [f for f in below if f['height'] == max_height]
+        chosen_v = max(closest_below, key=score_video)
+
+    if not chosen_v:
+        logger.warning("Falling back to absolute best available video format.")
+        chosen_v = max(video_formats, key=score_video)
+
+    # Choose audio: prefer Opus/Vorbis for WebM, AAC/M4A for MP4, else best tbr
+    chosen_a = None
+    if audio_formats:
+        if prefer_webm:
+            opus = [a for a in audio_formats if 'opus' in (a.get('acodec') or '') or 'vorbis' in (a.get('acodec') or '')]
+            if opus:
+                chosen_a = max(opus, key=lambda a: (a.get('tbr') or 0))
+        else:
+            aac = [a for a in audio_formats if 'mp4a' in (a.get('acodec') or '') or 'aac' in (a.get('acodec') or '')]
+            if aac:
+                chosen_a = max(aac, key=lambda a: (a.get('tbr') or 0))
+
+        if not chosen_a:
+            chosen_a = max(audio_formats, key=lambda a: (a.get('tbr') or 0))
+
+    logger.info(
+        f"Chosen video format: id={chosen_v.get('format_id')} "
+        f"height={chosen_v.get('height')} codec={chosen_v.get('vcodec')}"
+    )
+    if chosen_a:
+        logger.info(
+            f"Chosen audio format: id={chosen_a.get('format_id')} "
+            f"codec={chosen_a.get('acodec')} bitrate={chosen_a.get('tbr')}kbps"
+        )
+
+    v_id = chosen_v.get('format_id')
+    a_id = chosen_a.get('format_id') if chosen_a else None
+    return v_id, a_id
 
 
 def get_video_info(url):
@@ -152,7 +202,7 @@ def get_video_info(url):
             'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions'))
         }
 
-def _build_yt_dlp_options_for_mode(url, quality, mode):
+def _build_yt_dlp_options_for_mode(info, quality, mode):
     """
     Build a yt-dlp configuration for the selected mode and quality.
     This lets yt-dlp (and its internal ffmpeg calls) handle all merging
@@ -194,30 +244,19 @@ def _build_yt_dlp_options_for_mode(url, quality, mode):
         ext = "mp3"
         content_type = "audio/mpeg"
     else:
-        # Video modes
-        #
-        # Strategy for respecting requested resolution `q`:
-        # 1. Try an EXACT height match first (bestvideo[height=q]).
-        # 2. If not available, try any format with height >= q (prefer equal / higher).
-        # 3. Finally, fall back to the best format with height <= q.
-        #
-        # This keeps quality at or above what the user selected when possible,
-        # and only falls back below that if YouTube simply does not provide
-        # a higher-resolution stream.
+        # Video modes – we now select explicit format IDs using the probed
+        # metadata so that we are in full control of the chosen resolution.
+        prefer_webm = is_webm
+        v_id, a_id = _choose_video_and_audio_formats(info, q, prefer_webm=prefer_webm)
+        if not v_id:
+            raise Exception("Unable to choose a suitable video stream for the requested quality.")
+
+        if a_id:
+            fmt = f"{v_id}+{a_id}"
+        else:
+            fmt = v_id
+
         if is_webm:
-            fmt = (
-                # Exact height WebM
-                f"bestvideo[height={q}][ext=webm]+bestaudio[ext=webm]/"
-                f"bestvideo[height={q}]+bestaudio/"
-                # Any WebM at or above requested height
-                f"bestvideo[height>={q}][ext=webm]+bestaudio[ext=webm]/"
-                f"bestvideo[height>={q}]+bestaudio/"
-                # Any WebM up to requested height
-                f"bestvideo[height<={q}][ext=webm]+bestaudio[ext=webm]/"
-                f"bestvideo[height<={q}]+bestaudio/"
-                # Generic WebM / best
-                f"best[ext=webm]/best"
-            )
             opts.update({
                 'format': fmt,
                 'merge_output_format': 'webm',
@@ -225,20 +264,6 @@ def _build_yt_dlp_options_for_mode(url, quality, mode):
             ext = "webm"
             content_type = "video/webm"
         else:
-            # Default: MP4 video – allow any source ext, but merge to MP4.
-            fmt = (
-                # 1) Exact requested height, prefer MP4 video + M4A audio
-                f"bestvideo[height={q}][ext=mp4]+bestaudio[ext=m4a]/"
-                f"bestvideo[height={q}]+bestaudio/"
-                # 2) Any format with height >= requested
-                f"bestvideo[height>={q}][ext=mp4]+bestaudio[ext=m4a]/"
-                f"bestvideo[height>={q}]+bestaudio/"
-                # 3) Best up to requested height
-                f"bestvideo[height<={q}][ext=mp4]+bestaudio[ext=m4a]/"
-                f"bestvideo[height<={q}]+bestaudio/"
-                # 4) Fallback to container-preferring bests
-                f"best[ext=mp4]/best"
-            )
             opts.update({
                 'format': fmt,
                 'merge_output_format': 'mp4',
@@ -257,8 +282,19 @@ def stream_media(url, quality, mode):
     """
     quality = quality or "1080"
 
-    # Configure yt-dlp based on mode/quality
-    ydl_opts, ext, content_type = _build_yt_dlp_options_for_mode(url, quality, mode)
+    # First, probe video info so we can choose exact formats for the target height.
+    probe_opts = get_ydl_base_opts()
+    probe_opts.update({'skip_download': True})
+
+    with yt_dlp.YoutubeDL(probe_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            logger.error(f"Failed to probe video info for {url}: {e}")
+            raise Exception(f"Failed to extract video info: {str(e)}")
+
+    # Configure yt-dlp based on mode/quality and the probed info
+    ydl_opts, ext, content_type = _build_yt_dlp_options_for_mode(info, quality, mode)
 
     # Create a temp directory to hold the downloaded file(s)
     tmpdir = tempfile.mkdtemp(prefix="redcast_")
