@@ -3,6 +3,12 @@ import os
 import subprocess
 import json
 import re
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Use environment variables or defaults
 MAX_DURATION = int(os.getenv("MAX_DURATION_SECONDS", 1800)) # 30 minutes
@@ -49,18 +55,20 @@ def _get_best_video_format_id(info, target_height):
         best = max(candidates_below, key=score_fallback)
         return best['format_id']
         
-    return 'bestvideo[vcodec^=avc1]'
+    return None
 
 def get_video_info(url):
     ydl_opts = {
         'skip_download': True, 
         'quiet': True,
-        'noplaylist': True, # Strictly no playlists
+        'noplaylist': True,
+        'no_warnings': True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
         except Exception as e:
+            logger.error(f"yt-dlp error: {e}")
             raise Exception(f"Error fetching video info: {str(e)}")
 
         if 'entries' in info:
@@ -78,32 +86,58 @@ def get_video_info(url):
             'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions'))
         }
 
+def _stream_subprocess(process):
+    """Yields bytes from a subprocess stdout"""
+    try:
+        while True:
+            chunk = process.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            yield chunk
+        
+        if process.poll() is not None and process.returncode != 0:
+            stderr = process.stderr.read().decode('utf-8', errors='replace')
+            logger.error(f"FFmpeg process failed with code {process.returncode}: {stderr}")
+    except Exception as e:
+        logger.error(f"Streaming yield error: {e}")
+    finally:
+        try:
+            process.stdout.close()
+            process.stderr.close()
+            process.terminate()
+            process.wait(timeout=1)
+        except Exception as e:
+            logger.debug(f"Process cleanup error: {e}")
+
 def stream_media(url, quality, mode):
     """
     Generates a stream of data using ffmpeg pipe.
     """
-    # 1. Fetch info and check constraints
-    info = get_video_info(url)
-    
+    # 1. Fetch info
     ydl_opts_info = {'skip_download': True, 'quiet': True, 'no_warnings': True, 'noplaylist': True}
     target_height = quality if quality else '1080'
-    ext = "mp4"
-    content_type = "video/mp4"
-
-    # Get fresh info with formats
+    
     with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
-        info_full = ydl.extract_info(url, download=False)
+        try:
+            info_full = ydl.extract_info(url, download=False)
+        except Exception as e:
+            raise Exception(f"Failed to extract video info: {str(e)}")
 
     video_url = None
     audio_url = None
     selected_video_fmt = None
     
-    if mode == "video":
+    mode = mode.lower()
+    is_video = "video" in mode or "vid" == mode
+
+    if is_video:
+        ext = "mp4"
+        content_type = "video/mp4"
         target_height_int = int(target_height) if str(target_height).isdigit() else 1080
         video_id = _get_best_video_format_id(info_full, target_height_int)
         formats = info_full.get('formats', [])
         
-        if video_id and video_id != 'bestvideo':
+        if video_id:
             selected_video_fmt = next((f for f in formats if f['format_id'] == video_id), None)
             
         if not selected_video_fmt:
@@ -123,9 +157,9 @@ def stream_media(url, quality, mode):
         if audio_candidates:
             aac_candidates = [f for f in audio_candidates if 'mp4a' in f.get('acodec', '')]
             if aac_candidates:
-                 best_audio = max(aac_candidates, key=lambda f: (f.get('tbr') or 0))
+                best_audio = max(aac_candidates, key=lambda f: (f.get('tbr') or 0))
             else:
-                 best_audio = max(audio_candidates, key=lambda f: (f.get('tbr') or 0))
+                best_audio = max(audio_candidates, key=lambda f: (f.get('tbr') or 0))
             audio_url = best_audio['url']
     else:
         ext = "mp3"
@@ -139,9 +173,7 @@ def stream_media(url, quality, mode):
     safe_title = re.sub(r'[^\w\-_\. ]', '_', title)[:200]
     filename = f"{safe_title}.{ext}"
 
-    # Use 'ffmpeg' command directly (installed via apt in Docker)
     ffmpeg_binary = "ffmpeg"
-    
     input_args = []
     map_args = []
     codec_args = []
@@ -154,7 +186,7 @@ def stream_media(url, quality, mode):
         '-thread_queue_size', '8192'
     ]
     
-    if mode == "video":
+    if is_video:
         if video_url and audio_url:
              input_args.extend(network_args + ['-i', video_url])
              input_args.extend(network_args + ['-i', audio_url])
@@ -186,30 +218,23 @@ def stream_media(url, quality, mode):
         
     full_cmd = [ffmpeg_binary, '-hide_banner', '-loglevel', 'error'] + input_args + map_args + codec_args + output_args
     
-    return (_stream_subprocess(full_cmd), filename, content_type)
-
-def _stream_subprocess(cmd):
-    """Yields bytes from a subprocess stdout"""
+    # Start process BEFORE yielding to catch early failures
     process = subprocess.Popen(
-        cmd,
+        full_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, 
         bufsize=1024*1024 
     )
-    try:
-        while True:
-            chunk = process.stdout.read(64 * 1024)
-            if not chunk:
-                break
-            yield chunk
-    finally:
-        process.stdout.close()
-        process.stderr.close()
-        process.terminate()
+    
+    # Tiny sleep to catch immediate startup errors
+    time.sleep(0.3)
+    if process.poll() is not None:
+        stderr = process.stderr.read().decode('utf-8', errors='replace')
+        raise Exception(f"FFmpeg failed to start: {stderr}")
+
+    return (_stream_subprocess(process), filename, content_type)
 
 def download_subtitles(url, lang='en'):
-    """Simplified subtitle download (will save to temp and return bytes or handle differently)"""
-    # For now, we can keep it similar but remove the local bin paths
     import glob
     import tempfile
     
@@ -226,7 +251,11 @@ def download_subtitles(url, lang='en'):
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            try:
+                ydl.extract_info(url, download=True)
+            except Exception as e:
+                raise Exception(f"Subtitle download failed: {str(e)}")
+                
             files = glob.glob(f"{tmpdir}/*.srt")
             if not files:
                 raise Exception("No subtitles found.")

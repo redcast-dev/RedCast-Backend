@@ -77,9 +77,10 @@ def download():
     except Exception as e:
         error_msg = traceback.format_exc()
         logger.error(f"Download Error: {str(e)}\n{error_msg}")
+        # Always return error message for debugging, but only traceback if DEBUG is set
         return jsonify({
             "error": str(e),
-            "traceback": error_msg if os.getenv("DEBUG", "true").lower() == "true" else None
+            "traceback": error_msg if os.getenv("DEBUG", "true").lower() == "true" else "Traceback hidden. Set DEBUG=true to see it."
         }), 500
 
 @app.route("/api/subtitles", methods=["GET"])
@@ -97,7 +98,8 @@ def subtitles():
             content,
             mimetype="text/plain",
             headers={
-                "Content-Disposition": f"attachment; filename=\"{filename}\""
+                "Content-Disposition": f"attachment; filename=\"{filename}\"",
+                "Content-Security-Policy": "default-src 'self'; script-src 'none'; object-src 'none';"
             }
         )
     except Exception as e:

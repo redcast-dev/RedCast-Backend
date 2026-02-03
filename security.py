@@ -10,7 +10,7 @@ def setup_security(app):
         limiter = Limiter(
             get_remote_address,
             app=app,
-            default_limits=["50 per group", "200 per day"],
+            default_limits=["50 per hour", "200 per day"],
             storage_uri=storage_uri,
             strategy="fixed-window",
         )
@@ -19,7 +19,7 @@ def setup_security(app):
         limiter = Limiter(
             get_remote_address,
             app=app,
-            default_limits=["50 per group", "200 per day"],
+            default_limits=["50 per hour", "200 per day"],
             storage_uri="memory://",
             strategy="fixed-window",
         )
@@ -29,7 +29,7 @@ def setup_security(app):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none';"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'none'; object-src 'none';"
         return response
 
     return limiter
