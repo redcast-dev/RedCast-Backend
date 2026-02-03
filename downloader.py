@@ -109,6 +109,32 @@ def _get_best_video_format_id(info, target_height):
         
     return None
 
+
+def _get_crf_for_height(height: int) -> str:
+    """
+    Choose a CRF value based on resolution so that higher
+    resolutions keep more detail and lower resolutions stay efficient.
+    Lower CRF = higher quality.
+    """
+    try:
+        h = int(height)
+    except Exception:
+        h = 1080
+
+    if h >= 4320:
+        return "19"
+    if h >= 2160:
+        return "20"
+    if h >= 1440:
+        return "21"
+    if h >= 1080:
+        return "22"
+    if h >= 720:
+        return "23"
+    if h >= 480:
+        return "24"
+    return "25"
+
 def get_video_info(url):
     ydl_opts = get_ydl_base_opts()
     ydl_opts.update({
@@ -261,79 +287,81 @@ def stream_media(url, quality, mode):
     
     if is_video:
         if video_url and audio_url:
-             input_args.extend(['-probesize', '32M', '-analyzeduration', '10M'])
-             input_args.extend(network_args + ['-i', video_url])
-             input_args.extend(network_args + ['-i', audio_url])
-             map_args.extend(['-map', '0:v:0', '-map', '1:a:0'])
-             
-             # Check video codec to determine if re-encoding is needed
-             vcodec = (selected_video_fmt.get('vcodec') or '').lower()
-             
-             if ext == "webm":
-                 # For WebM output, we can copy VP9 but should re-encode others
-                 if 'vp9' in vcodec or 'vp09' in vcodec:
-                     codec_args.extend(['-c:v', 'copy', '-c:a', 'libopus', '-b:a', '192k'])
-                 else:
-                     # Re-encode to VP9 for compatibility
-                     codec_args.extend(['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0', '-c:a', 'libopus', '-b:a', '192k'])
-             else:
-                 # For MP4 output, re-encode VP9/AV1 to H.264 to fix green screen issue
-                 if 'vp9' in vcodec or 'vp09' in vcodec or 'av01' in vcodec or 'av1' in vcodec:
-                     # Re-encode to H.264 with proper pixel format
-                     codec_args.extend([
-                         '-c:v', 'libx264',
-                         '-preset', 'fast',  # Fast encoding for streaming
-                         '-crf', '23',  # Good quality
-                         '-pix_fmt', 'yuv420p',  # Critical: fixes green screen
-                         '-c:a', 'aac',
-                         '-b:a', '192k'
-                     ])
-                 elif 'avc' in vcodec or 'h264' in vcodec:
-                     # H.264 can be copied safely
-                     codec_args.extend(['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k'])
-                 else:
-                     # Unknown codec, re-encode to be safe
-                     codec_args.extend([
-                         '-c:v', 'libx264',
-                         '-preset', 'fast',
-                         '-crf', '23',
-                         '-pix_fmt', 'yuv420p',
-                         '-c:a', 'aac',
-                         '-b:a', '192k'
-                     ])
+            input_args.extend(['-probesize', '32M', '-analyzeduration', '10M'])
+            input_args.extend(network_args + ['-i', video_url])
+            input_args.extend(network_args + ['-i', audio_url])
+            map_args.extend(['-map', '0:v:0', '-map', '1:a:0'])
+
+            # Check video codec to determine if re-encoding is needed
+            vcodec = (selected_video_fmt.get('vcodec') or '').lower()
+            height = selected_video_fmt.get('height') or target_height_int
+            crf_value = _get_crf_for_height(height)
+
+            if ext == "webm":
+                # For WebM output, keep VP9 when possible, otherwise re-encode to VP9
+                if 'vp9' in vcodec or 'vp09' in vcodec:
+                    codec_args.extend(['-c:v', 'copy', '-c:a', 'libopus', '-b:a', '192k'])
+                else:
+                    codec_args.extend([
+                        '-c:v', 'libvpx-vp9',
+                        '-crf', crf_value,
+                        '-b:v', '0',
+                        '-c:a', 'libopus',
+                        '-b:a', '192k'
+                    ])
+            else:
+                # For MP4 output, ALWAYS re-encode to H.264 yuv420p for maximum compatibility
+                codec_args.extend([
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',  # Fast encoding for streaming
+                    '-crf', crf_value,
+                    '-pix_fmt', 'yuv420p',  # Critical: fixes green screen & compatibility
+                    '-profile:v', 'high',
+                    '-c:a', 'aac',
+                    '-b:a', '192k'
+                ])
         elif video_url:
-             input_args.extend(network_args + ['-i', video_url])
-             # Video already has audio, check codec
-             vcodec = (selected_video_fmt.get('vcodec') or '').lower()
-             
-             if ext == "mp4":
-                 # Re-encode VP9/AV1 to H.264 for MP4
-                 if 'vp9' in vcodec or 'vp09' in vcodec or 'av01' in vcodec or 'av1' in vcodec:
-                     codec_args = [
-                         '-c:v', 'libx264',
-                         '-preset', 'fast',
-                         '-crf', '23',
-                         '-pix_fmt', 'yuv420p',
-                         '-c:a', 'aac',
-                         '-b:a', '192k'
-                     ]
-                 else:
-                     codec_args = ['-c:v', 'copy', '-c:a', 'copy']
-             else:
-                 codec_args = ['-c', 'copy']
+            input_args.extend(network_args + ['-i', video_url])
+            vcodec = (selected_video_fmt.get('vcodec') or '').lower()
+            height = selected_video_fmt.get('height') or target_height_int
+            crf_value = _get_crf_for_height(height)
+
+            if ext == "mp4":
+                # Single input (video already has audio). Re-encode to a widely supported MP4.
+                codec_args = [
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', crf_value,
+                    '-pix_fmt', 'yuv420p',
+                    '-profile:v', 'high',
+                    '-c:a', 'aac',
+                    '-b:a', '192k'
+                ]
+            else:
+                # WebM path – copy VP9 when possible, otherwise re-encode to VP9
+                if 'vp9' in vcodec or 'vp09' in vcodec:
+                    codec_args = ['-c:v', 'copy', '-c:a', 'copy']
+                else:
+                    codec_args = [
+                        '-c:v', 'libvpx-vp9',
+                        '-crf', crf_value,
+                        '-b:v', '0',
+                        '-c:a', 'libopus',
+                        '-b:a', '192k'
+                    ]
         else:
-             raise Exception("Could not find suitable video stream")
-        
+            raise Exception("Could not find suitable video stream")
+
         if ext == "mp4":
+            # Produce a standard, player-friendly MP4 instead of a highly fragmented streaming-only file
             output_args = [
                 '-f', 'mp4',
-                '-movflags', 'frag_keyframe+empty_moov+default_base_moof+global_sidx',
-                '-bsf:v', 'dump_extra',
-                '-brand', 'mp42',
+                '-movflags', '+faststart',
                 'pipe:1'
             ]
         else:
-            output_args = ['-f', 'webm', '-dash', '1', 'pipe:1']
+            # Regular WebM container (no DASH segments) for better compatibility with players
+            output_args = ['-f', 'webm', 'pipe:1']
     else:
         target_url = audio_url if audio_url else video_url
         if not target_url:
