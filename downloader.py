@@ -15,8 +15,7 @@ MAX_DURATION = int(os.getenv("MAX_DURATION_SECONDS", 1800)) # 30 minutes
 
 def _get_best_video_format_id(info, target_height):
     """
-    Manually analyze formats to find the EXACT resolution requested.
-    Returns: explicit format_id string for video
+    Manually analyze formats to find the BEST version of the EXACT resolution requested.
     """
     formats = info.get('formats', [])
     video_formats = [
@@ -28,32 +27,40 @@ def _get_best_video_format_id(info, target_height):
         return None
         
     target_height = int(target_height)
+    # Check for exact matches first
     exact_matches = [f for f in video_formats if f['height'] == target_height]
     
     if exact_matches:
         def score_format(f):
             score = 0
-            vcodec = f.get('vcodec', '')
-            if 'avc1' in vcodec or 'h264' in vcodec:
-                score += 10000 
-            elif 'vp9' in vcodec or 'av01' in vcodec:
-                score -= 5000
-            tbr = f.get('tbr') or 0
-            score += tbr
+            vcodec = (f.get('vcodec') or '').lower()
+            
+            # For 4K/2K, we MUST use VP9/AV1 for true quality as H264 often doesn't exist or is poor
+            if target_height >= 1440:
+                if 'av01' in vcodec: # AV1 is best quality but hardest to decode
+                    score += 15000
+                elif 'vp9' in vcodec or 'vp09' in vcodec: # VP9 is standard for high quality YT
+                    score += 10000
+                elif 'avc' in vcodec or 'h264' in vcodec:
+                    score += 5000
+            else:
+                # For 1080p and below, prefer H.264 for maximum compatibility
+                if 'avc' in vcodec or 'h264' in vcodec:
+                    score += 15000
+                elif 'vp9' in vcodec or 'vp09' in vcodec:
+                    score += 10000
+            
+            # Bitrate helps choose the "cleanest" version
+            score += (f.get('tbr') or 0)
             return score
             
         best = max(exact_matches, key=score_format)
         return best['format_id']
         
-    candidates_below = [f for f in video_formats if f['height'] < target_height]
-    if candidates_below:
-        def score_fallback(f):
-            score = (f.get('height') or 0) * 100
-            if 'avc1' in f.get('vcodec', '') or 'h264' in f.get('vcodec', ''):
-                score += 50000
-            return score
-        best = max(candidates_below, key=score_fallback)
-        return best['format_id']
+    # Fallback to closest resolution BELOW target if exact not found
+    candidates = sorted(video_formats, key=lambda f: abs(f['height'] - target_height))
+    if candidates:
+        return candidates[0]['format_id']
         
     return None
 
@@ -90,7 +97,7 @@ def _stream_subprocess(process):
     """Yields bytes from a subprocess stdout"""
     try:
         while True:
-            chunk = process.stdout.read(64 * 1024)
+            chunk = process.stdout.read(128 * 1024) # Increased chunk size
             if not chunk:
                 break
             yield chunk
@@ -128,11 +135,11 @@ def stream_media(url, quality, mode):
     selected_video_fmt = None
     
     mode = mode.lower()
-    is_video = "video" in mode or "vid" == mode
+    is_video = "video" in mode or "vid" == mode or "webm" in mode
 
     if is_video:
-        ext = "mp4"
-        content_type = "video/mp4"
+        ext = "webm" if "webm" in mode else "mp4"
+        content_type = "video/webm" if ext == "webm" else "video/mp4"
         target_height_int = int(target_height) if str(target_height).isdigit() else 1080
         video_id = _get_best_video_format_id(info_full, target_height_int)
         formats = info_full.get('formats', [])
@@ -141,25 +148,25 @@ def stream_media(url, quality, mode):
             selected_video_fmt = next((f for f in formats if f['format_id'] == video_id), None)
             
         if not selected_video_fmt:
+            # Last resort fallback
             candidates = [f for f in formats if f.get('vcodec') != 'none' and f.get('height')]
             if candidates:
-                def stream_score(f):
-                    score = (f.get('height') or 0)
-                    if 'avc1' in f.get('vcodec', '') or 'h264' in f.get('vcodec', ''):
-                        score += 50000 
-                    return score
-                selected_video_fmt = max(candidates, key=stream_score) 
+                selected_video_fmt = max(candidates, key=lambda f: (f.get('height') or 0)) 
             
         if selected_video_fmt:
             video_url = selected_video_fmt['url']
         
+        # Audio selection
         audio_candidates = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
         if audio_candidates:
-            aac_candidates = [f for f in audio_candidates if 'mp4a' in f.get('acodec', '')]
-            if aac_candidates:
-                best_audio = max(aac_candidates, key=lambda f: (f.get('tbr') or 0))
+            if ext == "webm":
+                # For WebM, opus/vorbis is better
+                opus_candidates = [f for f in audio_candidates if 'opus' in f.get('acodec', '')]
+                best_audio = max(opus_candidates if opus_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
             else:
-                best_audio = max(audio_candidates, key=lambda f: (f.get('tbr') or 0))
+                # For MP4, AAC is best
+                aac_candidates = [f for f in audio_candidates if 'mp4a' in f.get('acodec', '')]
+                best_audio = max(aac_candidates if aac_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
             audio_url = best_audio['url']
     else:
         ext = "mp3"
@@ -178,32 +185,46 @@ def stream_media(url, quality, mode):
     map_args = []
     codec_args = []
     
+    # Enhanced network args for stability
     network_args = [
         '-reconnect', '1',
+        '-reconnect_at_eof', '1', # Critical for handling quick disconnections
         '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '5',
+        '-reconnect_delay_max', '10',
         '-multiple_requests', '1',
-        '-thread_queue_size', '8192'
+        '-thread_queue_size', '16384', # Even larger queue
+        '-err_detect', 'ignore_err' # Help skip minor packet corruption
     ]
     
     if is_video:
         if video_url and audio_url:
+             input_args.extend(['-probesize', '32M', '-analyzeduration', '10M'])
              input_args.extend(network_args + ['-i', video_url])
              input_args.extend(network_args + ['-i', audio_url])
              map_args.extend(['-map', '0:v:0', '-map', '1:a:0'])
-             codec_args.extend(['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k'])
+             
+             if ext == "webm":
+                 codec_args.extend(['-c:v', 'copy', '-c:a', 'libopus', '-b:a', '192k'])
+             else:
+                 # Logic for MP4: if source is already compatible, copy.
+                 # If source is VP9/AV1, we still copy to MP4 (supported by many) but add better flags.
+                 codec_args.extend(['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k'])
         elif video_url:
              input_args.extend(network_args + ['-i', video_url])
              codec_args = ['-c', 'copy']
         else:
              raise Exception("Could not find suitable video stream")
         
-        output_args = [
-            '-f', 'mp4',
-            '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-            '-bsf:v', 'dump_extra',
-            'pipe:1'
-        ]
+        if ext == "mp4":
+            output_args = [
+                '-f', 'mp4',
+                '-movflags', 'frag_keyframe+empty_moov+default_base_moof+global_sidx',
+                '-bsf:v', 'dump_extra',
+                '-brand', 'mp42',
+                'pipe:1'
+            ]
+        else:
+            output_args = ['-f', 'webm', '-dash', '1', 'pipe:1']
     else:
         target_url = audio_url if audio_url else video_url
         if not target_url:
@@ -218,16 +239,15 @@ def stream_media(url, quality, mode):
         
     full_cmd = [ffmpeg_binary, '-hide_banner', '-loglevel', 'error'] + input_args + map_args + codec_args + output_args
     
-    # Start process BEFORE yielding to catch early failures
+    # Start process
     process = subprocess.Popen(
         full_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, 
-        bufsize=1024*1024 
+        bufsize=2*1024*1024 # 2MB buffer
     )
     
-    # Tiny sleep to catch immediate startup errors
-    time.sleep(0.3)
+    time.sleep(0.5)
     if process.poll() is not None:
         stderr = process.stderr.read().decode('utf-8', errors='replace')
         raise Exception(f"FFmpeg failed to start: {stderr}")
