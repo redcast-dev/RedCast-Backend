@@ -38,11 +38,11 @@ def get_ydl_base_opts():
         'skip_unavailable_fragments': True,
         'socket_timeout': 30,
         # Extractor args for YouTube specifically - 'ios' is often more resilient in data centers
+        # We MUST NOT skip HLS/DASH when using iOS client as it relies on them
         'extractor_args': {
             'youtube': {
                 'player_client': ['ios'],
                 'player_skip': ['webpage', 'configs'],
-                'skip': ['hls', 'dash'],
             }
         },
     }
@@ -217,17 +217,22 @@ def stream_media(url, quality, mode):
             video_url = selected_video_fmt['url']
         
         # Audio selection
-        audio_candidates = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-        if audio_candidates:
-            if ext == "webm":
-                # For WebM, opus/vorbis is better
-                opus_candidates = [f for f in audio_candidates if 'opus' in f.get('acodec', '')]
-                best_audio = max(opus_candidates if opus_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
-            else:
-                # For MP4, AAC is best
-                aac_candidates = [f for f in audio_candidates if 'mp4a' in f.get('acodec', '')]
-                best_audio = max(aac_candidates if aac_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
-            audio_url = best_audio['url']
+        # Only look for separate audio if the video doesn't have it
+        if selected_video_fmt and selected_video_fmt.get('acodec') != 'none':
+            # Video stream already has audio (common with HLS/iOS)
+            audio_url = None
+        else:
+            audio_candidates = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+            if audio_candidates:
+                if ext == "webm":
+                    # For WebM, opus/vorbis is better
+                    opus_candidates = [f for f in audio_candidates if 'opus' in f.get('acodec', '')]
+                    best_audio = max(opus_candidates if opus_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
+                else:
+                    # For MP4, AAC is best
+                    aac_candidates = [f for f in audio_candidates if 'mp4a' in f.get('acodec', '')]
+                    best_audio = max(aac_candidates if aac_candidates else audio_candidates, key=lambda f: (f.get('tbr') or 0))
+                audio_url = best_audio['url']
     else:
         ext = "mp3"
         content_type = "audio/mpeg"
