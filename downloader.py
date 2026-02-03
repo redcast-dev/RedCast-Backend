@@ -37,11 +37,13 @@ def get_ydl_base_opts():
         'fragment_retries': 10,
         'skip_unavailable_fragments': True,
         'socket_timeout': 30,
-        # Extractor args for YouTube specifically - 'ios' is often more resilient in data centers
-        # We MUST NOT skip HLS/DASH when using iOS client as it relies on them
+        # Extractor args for YouTube specifically
+        # - Avoid 'web' client to prevent "Sign in" errors
+        # - Use 'android' and 'ios' for best compatibility
+        # - Do NOT skip HLS/DASH as they are needed for these clients
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios'],
+                'player_client': ['android', 'ios'],
                 'player_skip': ['webpage', 'configs'],
             }
         },
