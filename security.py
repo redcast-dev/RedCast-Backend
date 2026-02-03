@@ -10,7 +10,7 @@ def setup_security(app):
         limiter = Limiter(
             get_remote_address,
             app=app,
-            default_limits=["50 per hour", "200 per day"],
+            default_limits=["1000 per hour", "5000 per day"],
             storage_uri=storage_uri,
             strategy="fixed-window",
         )
@@ -19,7 +19,7 @@ def setup_security(app):
         limiter = Limiter(
             get_remote_address,
             app=app,
-            default_limits=["50 per hour", "200 per day"],
+            default_limits=["1000 per hour", "5000 per day"],
             storage_uri="memory://",
             strategy="fixed-window",
         )

@@ -68,8 +68,9 @@ def get_video_info(url):
     ydl_opts = {
         'skip_download': True, 
         'quiet': True,
-        'noplaylist': True,
+        'noplaylist': False, # Enable playlist analysis
         'no_warnings': True,
+        'extract_flat': True, # Don't extract full details for every video in playlist yet (too slow)
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
@@ -79,12 +80,22 @@ def get_video_info(url):
             raise Exception(f"Error fetching video info: {str(e)}")
 
         if 'entries' in info:
-            raise Exception("Playlist downloads are disabled.")
+            # It's a playlist
+            entries = list(info['entries'])
+            return {
+                'type': 'playlist',
+                'title': info.get('title', 'Unknown Playlist'),
+                'count': len(entries),
+                'videos': [
+                    {'url': f"https://www.youtube.com/watch?v={entry['id']}", 'title': entry.get('title', 'Unknown')}
+                    for entry in entries if entry.get('id')
+                ]
+            }
 
+        # It's a single video
         duration = info.get('duration', 0)
-        if duration > MAX_DURATION:
-            raise Exception(f"Video is too long ({duration}s). Max allowed is {MAX_DURATION}s.")
-
+        # No limitation check
+        
         return {
             'type': 'video',
             'title': info.get('title', 'Unknown'),
