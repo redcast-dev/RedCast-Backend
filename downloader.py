@@ -73,6 +73,7 @@ def _get_best_video_format_id(info, target_height):
     ]
     
     if not video_formats:
+        logger.warning("No video formats found")
         return None
         
     target_height = int(target_height)
@@ -84,32 +85,27 @@ def _get_best_video_format_id(info, target_height):
             score = 0
             vcodec = (f.get('vcodec') or '').lower()
             
-            # For 4K/2K, we MUST use VP9/AV1 for true quality as H264 often doesn't exist or is poor
-            if target_height >= 1440:
-                if 'av01' in vcodec: # AV1 is best quality but hardest to decode
-                    score += 15000
-                elif 'vp9' in vcodec or 'vp09' in vcodec: # VP9 is standard for high quality YT
-                    score += 10000
-                elif 'avc' in vcodec or 'h264' in vcodec:
-                    score += 5000
-            else:
-                # For 1080p and below, prefer H.264 for maximum compatibility
-                if 'avc' in vcodec or 'h264' in vcodec:
-                    score += 15000
-                elif 'vp9' in vcodec or 'vp09' in vcodec:
-                    score += 10000
+            # Prefer VP9/AV1 for high quality (we'll re-encode to H.264 if needed)
+            if 'av01' in vcodec:
+                score += 15000
+            elif 'vp9' in vcodec or 'vp09' in vcodec:
+                score += 10000
+            elif 'avc' in vcodec or 'h264' in vcodec:
+                score += 8000
             
-            # Bitrate helps choose the "cleanest" version
+            # Bitrate is critical for quality
             score += (f.get('tbr') or 0)
             return score
             
         best = max(exact_matches, key=score_format)
+        logger.info(f"Selected exact match: {target_height}p, codec: {best.get('vcodec')}, bitrate: {best.get('tbr')}kbps")
         return best['format_id']
         
-    # Fallback to closest resolution BELOW target if exact not found
-    candidates = sorted(video_formats, key=lambda f: abs(f['height'] - target_height))
-    if candidates:
-        return candidates[0]['format_id']
+    # Fallback: prefer highest quality available (not closest)
+    logger.warning(f"No exact match for {target_height}p, selecting best available quality")
+    best_available = max(video_formats, key=lambda f: (f.get('height') or 0, f.get('tbr') or 0))
+    logger.info(f"Selected fallback: {best_available.get('height')}p, codec: {best_available.get('vcodec')}, bitrate: {best_available.get('tbr')}kbps")
+    return best_available['format_id']
         
     return None
 
@@ -270,15 +266,61 @@ def stream_media(url, quality, mode):
              input_args.extend(network_args + ['-i', audio_url])
              map_args.extend(['-map', '0:v:0', '-map', '1:a:0'])
              
+             # Check video codec to determine if re-encoding is needed
+             vcodec = (selected_video_fmt.get('vcodec') or '').lower()
+             
              if ext == "webm":
-                 codec_args.extend(['-c:v', 'copy', '-c:a', 'libopus', '-b:a', '192k'])
+                 # For WebM output, we can copy VP9 but should re-encode others
+                 if 'vp9' in vcodec or 'vp09' in vcodec:
+                     codec_args.extend(['-c:v', 'copy', '-c:a', 'libopus', '-b:a', '192k'])
+                 else:
+                     # Re-encode to VP9 for compatibility
+                     codec_args.extend(['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0', '-c:a', 'libopus', '-b:a', '192k'])
              else:
-                 # Logic for MP4: if source is already compatible, copy.
-                 # If source is VP9/AV1, we still copy to MP4 (supported by many) but add better flags.
-                 codec_args.extend(['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k'])
+                 # For MP4 output, re-encode VP9/AV1 to H.264 to fix green screen issue
+                 if 'vp9' in vcodec or 'vp09' in vcodec or 'av01' in vcodec or 'av1' in vcodec:
+                     # Re-encode to H.264 with proper pixel format
+                     codec_args.extend([
+                         '-c:v', 'libx264',
+                         '-preset', 'fast',  # Fast encoding for streaming
+                         '-crf', '23',  # Good quality
+                         '-pix_fmt', 'yuv420p',  # Critical: fixes green screen
+                         '-c:a', 'aac',
+                         '-b:a', '192k'
+                     ])
+                 elif 'avc' in vcodec or 'h264' in vcodec:
+                     # H.264 can be copied safely
+                     codec_args.extend(['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k'])
+                 else:
+                     # Unknown codec, re-encode to be safe
+                     codec_args.extend([
+                         '-c:v', 'libx264',
+                         '-preset', 'fast',
+                         '-crf', '23',
+                         '-pix_fmt', 'yuv420p',
+                         '-c:a', 'aac',
+                         '-b:a', '192k'
+                     ])
         elif video_url:
              input_args.extend(network_args + ['-i', video_url])
-             codec_args = ['-c', 'copy']
+             # Video already has audio, check codec
+             vcodec = (selected_video_fmt.get('vcodec') or '').lower()
+             
+             if ext == "mp4":
+                 # Re-encode VP9/AV1 to H.264 for MP4
+                 if 'vp9' in vcodec or 'vp09' in vcodec or 'av01' in vcodec or 'av1' in vcodec:
+                     codec_args = [
+                         '-c:v', 'libx264',
+                         '-preset', 'fast',
+                         '-crf', '23',
+                         '-pix_fmt', 'yuv420p',
+                         '-c:a', 'aac',
+                         '-b:a', '192k'
+                     ]
+                 else:
+                     codec_args = ['-c:v', 'copy', '-c:a', 'copy']
+             else:
+                 codec_args = ['-c', 'copy']
         else:
              raise Exception("Could not find suitable video stream")
         
