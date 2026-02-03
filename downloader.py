@@ -117,16 +117,16 @@ def _choose_video_and_audio_formats(info, target_height: int, prefer_webm: bool 
     if exact:
         # Best score among exact height candidates
         chosen_v = max(exact, key=score_video)
-    elif above:
-        # Closest above: minimal height diff, then score
-        min_height = min(f['height'] for f in above)
-        closest_above = [f for f in above if f['height'] == min_height]
-        chosen_v = max(closest_above, key=score_video)
     elif below:
-        # Closest below: maximal height, then score
+        # Prefer the closest LOWER resolution to truly respect the user's choice
         max_height = max(f['height'] for f in below)
         closest_below = [f for f in below if f['height'] == max_height]
         chosen_v = max(closest_below, key=score_video)
+    elif above:
+        # Only if nothing <= target exists, go to the smallest higher resolution
+        min_height = min(f['height'] for f in above)
+        closest_above = [f for f in above if f['height'] == min_height]
+        chosen_v = max(closest_above, key=score_video)
 
     if not chosen_v:
         logger.warning("Falling back to absolute best available video format.")
@@ -298,7 +298,12 @@ def stream_media(url, quality, mode):
 
     # Create a temp directory to hold the downloaded file(s)
     tmpdir = tempfile.mkdtemp(prefix="redcast_")
-    outtmpl = os.path.join(tmpdir, "download.%(ext)s")
+
+    # Use the original video title as filename; yt-dlp will also sanitize it.
+    # We still scope it to the temp directory so multiple downloads don't clash.
+    title = info.get('title') or 'video'
+    # yt-dlp will sanitize invalid characters; we just provide a pattern.
+    outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
     ydl_opts['outtmpl'] = outtmpl
 
     logger.info(f"Starting yt-dlp download for URL={url}, quality={quality}, mode={mode}")
@@ -317,8 +322,8 @@ def stream_media(url, quality, mode):
         logger.error(f"yt-dlp download failed: {e}")
         raise Exception(f"Download failed: {str(e)}")
 
-    # Locate the actual output file
-    files = glob.glob(os.path.join(tmpdir, "download.*"))
+    # Locate the actual output file matching our expected extension
+    files = glob.glob(os.path.join(tmpdir, f"*.{ext}"))
     if not files:
         # Fallback: try to infer from info
         logger.error("No output files found after yt-dlp download.")
