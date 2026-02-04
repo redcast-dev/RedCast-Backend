@@ -5,6 +5,7 @@ import json
 import re
 import time
 import logging
+import base64
 from pathlib import Path
 import tempfile
 import glob
@@ -15,6 +16,32 @@ logger = logging.getLogger(__name__)
 
 # Use environment variables or defaults
 MAX_DURATION = int(os.getenv("MAX_DURATION_SECONDS", 1800)) # 30 minutes
+
+# Cached path for cookies written from YT_COOKIES_BASE64 (one temp file per process)
+_cookies_temp_path = None
+
+
+def _get_cookies_path():
+    """Resolve cookies: YT_COOKIES_FILE path, or temp file from YT_COOKIES_BASE64."""
+    global _cookies_temp_path
+    cookie_file = os.getenv("YT_COOKIES_FILE")
+    if cookie_file and os.path.isfile(cookie_file):
+        return cookie_file
+    cookies_b64 = os.getenv("YT_COOKIES_BASE64")
+    if cookies_b64:
+        if _cookies_temp_path is None:
+            try:
+                raw = base64.b64decode(cookies_b64, validate=True).decode("utf-8", errors="replace")
+                fd, _cookies_temp_path = tempfile.mkstemp(prefix="yt_cookies_", suffix=".txt")
+                os.write(fd, raw.encode("utf-8"))
+                os.close(fd)
+                logger.info("Using YouTube cookies from YT_COOKIES_BASE64 (temp file)")
+            except Exception as e:
+                logger.warning("Invalid YT_COOKIES_BASE64, ignoring: %s", e)
+                return None
+        return _cookies_temp_path
+    return None
+
 
 # Enhanced yt-dlp options to bypass bot detection
 def get_ydl_base_opts():
@@ -44,24 +71,25 @@ def get_ydl_base_opts():
         # available formats (including 720p/1080p/4K) are exposed.
     }
 
-    # --- Cookie handling for bot / sign-in checks ---
-    # If you provide a cookie file path via YT_COOKIES_FILE, yt-dlp will use it.
-    cookie_file = os.getenv("YT_COOKIES_FILE")
+    # --- Cookie handling for bot / sign-in checks (required for YouTube in production) ---
+    cookie_file = _get_cookies_path()
     if cookie_file:
-        # This is equivalent to using --cookies on the yt-dlp CLI
         opts["cookiefile"] = cookie_file
-        logger.info(f"Using YouTube cookies from file: {cookie_file}")
+        if os.getenv("YT_COOKIES_FILE") and not os.getenv("YT_COOKIES_BASE64"):
+            logger.info("Using YouTube cookies from file: %s", cookie_file)
     else:
-        # Optional: allow using cookies from a local browser when running
-        # the backend on a desktop (not recommended/usable on Railway).
+        # Optional: cookies from local browser (only works when running on a machine with that browser)
         browser = os.getenv("YT_COOKIES_FROM_BROWSER")
         if browser:
-            # e.g. YT_COOKIES_FROM_BROWSER=chrome or firefox
             opts["cookiesfrombrowser"] = (browser,)
-            logger.info(f"Using YouTube cookies from browser: {browser}")
+            logger.info("Using YouTube cookies from browser: %s", browser)
+        else:
+            logger.warning(
+                "No YouTube cookies configured. YouTube may block requests in production. "
+                "Set YT_COOKIES_FILE or YT_COOKIES_BASE64. See backend/README.md"
+            )
 
     logger.info("Using enhanced anti-bot configuration")
-    
     return opts
 
 def _choose_video_and_audio_formats(info, target_height: int, prefer_webm: bool = False):
